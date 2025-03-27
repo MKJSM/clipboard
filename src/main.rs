@@ -1,6 +1,6 @@
 use arboard::Clipboard;
 use csv::Writer;
-use eframe::egui::{self, CentralPanel, TextEdit};
+use eframe::egui::{self, CentralPanel, ScrollArea, TextEdit};
 use sqlx::{sqlite::SqlitePoolOptions, Pool, Sqlite};
 use std::{fs::File, path::Path, sync::Arc, time::Duration};
 use tokio::{sync::RwLock, task, time::sleep};
@@ -48,6 +48,7 @@ async fn main() {
             Box::new(ClipboardApp {
                 pool,
                 clipboard_history,
+                local_history: Vec::new(),
                 dark_mode: true,
             })
         }),
@@ -77,14 +78,13 @@ async fn monitor_clipboard(pool: Pool<Sqlite>, clipboard_history: Arc<RwLock<Vec
     loop {
         if let Ok(content) = clipboard.get_text() {
             if content != last_clipboard_content {
-                println!("Clipboard changed: {}", content);
                 last_clipboard_content = content.clone();
                 save_to_db(&pool, &content).await;
                 update_ui_history(&pool, &clipboard_history).await;
             }
         }
 
-        sleep(Duration::from_secs(1)).await; // Check clipboard every second
+        sleep(Duration::from_secs(1)).await;
     }
 }
 
@@ -148,25 +148,33 @@ async fn export_to_csv(pool: &Pool<Sqlite>) {
     println!("Clipboard history exported to {}", EXPORT_PATH);
 }
 
-/// Clipboard History App UI
+/// **Clipboard History App UI**
 struct ClipboardApp {
     pool: Pool<Sqlite>,
     clipboard_history: Arc<RwLock<Vec<(i32, String)>>>,
+    local_history: Vec<(i32, String)>,
+    search_query: String, // Stores search input
     dark_mode: bool,
 }
 
 impl eframe::App for ClipboardApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        let history = self.clipboard_history.clone();
-        let clone_history = self.clipboard_history.clone();
         let pool_clone = self.pool.clone();
+        let history_clone_task = self.clipboard_history.clone();
+        let history_clone_ui = self.clipboard_history.clone();
 
-        // Run async task to update UI state
+        // **Update history in a background task**
         task::spawn(async move {
-            update_ui_history(&pool_clone, &history).await;
+            update_ui_history(&pool_clone, &history_clone_task).await;
         });
 
-        egui::CentralPanel::default().show(ctx, |ui| {
+        // **Try reading history without blocking UI**
+        if let Ok(history) = history_clone_ui.try_read() {
+            self.local_history = history.clone();
+        }
+
+        // **UI Rendering**
+        egui::CentralPanel::default().show(ctx, |_ui| {
             if self.dark_mode {
                 ctx.set_visuals(egui::Visuals::dark());
             } else {
@@ -176,10 +184,12 @@ impl eframe::App for ClipboardApp {
             egui::TopBottomPanel::top("header").show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     ui.label("Theme:");
-                    if ui.button(if self.dark_mode { "🌙" } else { "" }).clicked() {
+                    if ui
+                        .button(if self.dark_mode { "🌙" } else { "☀️" })
+                        .clicked()
+                    {
                         self.dark_mode = !self.dark_mode;
                     }
-                    // Export Button
                     if ui.button("📂 Export to CSV").clicked() {
                         let pool_clone = self.pool.clone();
                         task::spawn(async move {
@@ -190,34 +200,35 @@ impl eframe::App for ClipboardApp {
             });
 
             CentralPanel::default().show(ctx, |ui| {
-                let history = clone_history.blocking_read(); // Async read lock
-                                                             // let history = clone_history.try_read().unwrap(); // Async read lock
-                let history: Vec<(i32, String)> = vec![];
-                for (id, entry) in history.iter() {
-                    ui.horizontal(|ui| {
-                        if ui.button("📋 Copy").clicked() {
-                            let mut clipboard =
-                                Clipboard::new().expect("Failed to access clipboard");
-                            clipboard
-                                .set_text(entry.clone())
-                                .expect("Failed to copy to clipboard");
-                        }
-                        if ui.button("❌ Delete").clicked() {
-                            let id_copy = *id;
-                            let pool_clone = self.pool.clone();
-                            let history_clone = self.clipboard_history.clone();
-                            task::spawn(async move {
-                                delete_entry(&pool_clone, id_copy, history_clone).await;
-                            });
-                        }
-                        ui.add(
-                            TextEdit::singleline(&mut entry.clone()).desired_width(f32::INFINITY),
-                        );
-                    });
-                }
+                ScrollArea::vertical().show(ui, |ui| {
+                    for (id, entry) in &self.local_history {
+                        ui.horizontal(|ui| {
+                            if ui.button("📋 Copy").clicked() {
+                                let mut clipboard =
+                                    Clipboard::new().expect("Failed to access clipboard");
+                                clipboard
+                                    .set_text(entry.clone())
+                                    .expect("Failed to copy to clipboard");
+                            }
+                            if ui.button("❌ Delete").clicked() {
+                                let id_copy = *id;
+                                let pool_clone = self.pool.clone();
+                                let history_clone = self.clipboard_history.clone();
+                                task::spawn(async move {
+                                    delete_entry(&pool_clone, id_copy, history_clone).await;
+                                });
+                            }
+                            ui.add(
+                                TextEdit::singleline(&mut entry.clone())
+                                    .desired_width(f32::INFINITY),
+                            );
+                        });
+                    }
+                });
             });
         });
 
-        ctx.request_repaint(); // Keep updating UI
+        // **Request repaint to keep UI updated**
+        ctx.request_repaint();
     }
 }
