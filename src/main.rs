@@ -1,6 +1,7 @@
 use arboard::Clipboard;
 use csv::Writer;
 use eframe::egui::{self, CentralPanel, ScrollArea, TextEdit};
+use eframe::egui::{TopBottomPanel, Visuals};
 use sqlx::{sqlite::SqlitePoolOptions, Pool, Sqlite};
 use std::{fs::File, path::Path, sync::Arc, time::Duration};
 use tokio::{sync::RwLock, task, time::sleep};
@@ -49,6 +50,8 @@ async fn main() {
                 pool,
                 clipboard_history,
                 local_history: Vec::new(),
+                search_query: String::new(),
+                filtered_history: Vec::new(),
                 dark_mode: true,
             })
         }),
@@ -152,8 +155,9 @@ async fn export_to_csv(pool: &Pool<Sqlite>) {
 struct ClipboardApp {
     pool: Pool<Sqlite>,
     clipboard_history: Arc<RwLock<Vec<(i32, String)>>>,
-    local_history: Vec<(i32, String)>,
-    search_query: String, // Stores search input
+    local_history: Vec<(i32, String)>, // Stores history for UI updates
+    filtered_history: Vec<(i32, String)>, // Stores filtered search results
+    search_query: String,              // Stores search input
     dark_mode: bool,
 }
 
@@ -168,63 +172,85 @@ impl eframe::App for ClipboardApp {
             update_ui_history(&pool_clone, &history_clone_task).await;
         });
 
-        // **Try reading history without blocking UI**
+        // **Read history & filter results**
         if let Ok(history) = history_clone_ui.try_read() {
             self.local_history = history.clone();
+            self.filtered_history = self
+                .local_history
+                .iter()
+                .filter(|(_, content)| {
+                    content
+                        .to_lowercase()
+                        .contains(&self.search_query.to_lowercase())
+                })
+                .cloned()
+                .collect();
         }
 
-        // **UI Rendering**
-        egui::CentralPanel::default().show(ctx, |_ui| {
-            if self.dark_mode {
-                ctx.set_visuals(egui::Visuals::dark());
-            } else {
-                ctx.set_visuals(egui::Visuals::light());
-            }
+        // **Apply Theme**
+        ctx.set_visuals(if self.dark_mode {
+            Visuals::dark()
+        } else {
+            Visuals::light()
+        });
 
-            egui::TopBottomPanel::top("header").show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label("Theme:");
-                    if ui
-                        .button(if self.dark_mode { "🌙" } else { "☀️" })
-                        .clicked()
-                    {
-                        self.dark_mode = !self.dark_mode;
-                    }
-                    if ui.button("📂 Export to CSV").clicked() {
-                        let pool_clone = self.pool.clone();
-                        task::spawn(async move {
-                            export_to_csv(&pool_clone).await;
-                        });
-                    }
+        // **Header Panel (Buttons + Search Bar)**
+        TopBottomPanel::top("header").show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                // **Theme Toggle Button**
+                if ui
+                    .button(if self.dark_mode {
+                        "🌙 Dark"
+                    } else {
+                        "☀️ Light"
+                    })
+                    .clicked()
+                {
+                    self.dark_mode = !self.dark_mode; // Toggle state
+                }
+
+                if ui.button("📂 Export to CSV").clicked() {
+                    let pool_clone = self.pool.clone();
+                    task::spawn(async move {
+                        export_to_csv(&pool_clone).await;
+                    });
+                }
+
+                // **Search Bar**
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.add(
+                        TextEdit::singleline(&mut self.search_query)
+                            .hint_text("🔍 Search clipboard..."),
+                    );
                 });
             });
+        });
 
-            CentralPanel::default().show(ctx, |ui| {
-                ScrollArea::vertical().show(ui, |ui| {
-                    for (id, entry) in &self.local_history {
-                        ui.horizontal(|ui| {
-                            if ui.button("📋 Copy").clicked() {
-                                let mut clipboard =
-                                    Clipboard::new().expect("Failed to access clipboard");
-                                clipboard
-                                    .set_text(entry.clone())
-                                    .expect("Failed to copy to clipboard");
-                            }
-                            if ui.button("❌ Delete").clicked() {
-                                let id_copy = *id;
-                                let pool_clone = self.pool.clone();
-                                let history_clone = self.clipboard_history.clone();
-                                task::spawn(async move {
-                                    delete_entry(&pool_clone, id_copy, history_clone).await;
-                                });
-                            }
-                            ui.add(
-                                TextEdit::singleline(&mut entry.clone())
-                                    .desired_width(f32::INFINITY),
-                            );
-                        });
-                    }
-                });
+        // **Main Content (Filtered clipboard history with scroll)**
+        CentralPanel::default().show(ctx, |ui| {
+            ScrollArea::vertical().show(ui, |ui| {
+                for (id, entry) in &self.filtered_history {
+                    ui.horizontal(|ui| {
+                        if ui.button("📋 Copy").clicked() {
+                            let mut clipboard =
+                                Clipboard::new().expect("Failed to access clipboard");
+                            clipboard
+                                .set_text(entry.clone())
+                                .expect("Failed to copy to clipboard");
+                        }
+                        if ui.button("❌ Delete").clicked() {
+                            let id_copy = *id;
+                            let pool_clone = self.pool.clone();
+                            let history_clone = self.clipboard_history.clone();
+                            task::spawn(async move {
+                                delete_entry(&pool_clone, id_copy, history_clone).await;
+                            });
+                        }
+                        ui.add(
+                            TextEdit::singleline(&mut entry.clone()).desired_width(f32::INFINITY),
+                        );
+                    });
+                }
             });
         });
 
