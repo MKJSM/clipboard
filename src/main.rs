@@ -2,14 +2,11 @@ use arboard::Clipboard;
 use csv::Writer;
 use eframe::egui::{self, CentralPanel, ScrollArea, TextEdit, TopBottomPanel, Visuals};
 use sqlx::{sqlite::SqlitePoolOptions, Pool, Sqlite};
-use std::{
-    env,
-    fs::File,
-    path::{Path, PathBuf},
-    sync::Arc,
-    time::Duration,
-};
+use std::{fs::File, path::Path, sync::Arc, time::Duration};
 use tokio::{sync::RwLock, task, time::sleep};
+
+mod autostart;
+mod icon;
 
 const DB_PATH: &str = "clipboard_history.db"; // SQLite database file
 const EXPORT_PATH: &str = "clipboard_export.csv"; // Export file
@@ -22,8 +19,29 @@ struct Data {
 
 #[tokio::main]
 async fn main() {
-    setup_autostart();
+    #[cfg(target_os = "linux")]
+    icon::setup_desktop_shortcut(&std::env::current_exe().unwrap());
+
+    #[cfg(target_os = "windows")]
+    icon::setup_desktop_shortcut(&std::env::current_exe().unwrap());
+
+    #[cfg(target_os = "macos")]
+    icon::setup_desktop_shortcut(&std::env::current_exe().unwrap());
+
+    println!("Clipboard Manager shortcut is created...");
+
+    #[cfg(target_os = "linux")]
+    autostart::setup_autostart_linux(&std::env::current_exe().unwrap());
+
+    #[cfg(target_os = "windows")]
+    autostart::setup_autostart_windows(&std::env::current_exe().unwrap());
+
+    #[cfg(target_os = "macos")]
+    autostart::setup_autostart_macos(&std::env::current_exe().unwrap());
+    println!("Clipboard Manager is set to auto-start on boot...");
+
     run_clipboard_monitor().await;
+    println!("Clipboard Manager is running...");
 }
 
 /// Creates the clipboard history table if it doesn't exist
@@ -224,133 +242,6 @@ impl eframe::App for ClipboardApp {
         // **Request repaint to keep UI updated**
         ctx.request_repaint();
     }
-}
-
-/// 📌 Automatically register clipboard manager to run at startup
-fn setup_autostart() {
-    let binary_path = env::current_exe().expect("Failed to get binary path");
-
-    #[cfg(target_os = "linux")]
-    setup_autostart_linux(&binary_path);
-
-    #[cfg(target_os = "macos")]
-    setup_autostart_macos(&binary_path);
-
-    #[cfg(target_os = "windows")]
-    setup_autostart_windows(&binary_path);
-}
-
-/// 📌 Linux: Create a `systemd` service for auto-start#[cfg(target_os = "linux")]
-#[cfg(target_os = "linux")]
-fn setup_autostart_linux(binary_path: &PathBuf) {
-    use dirs::home_dir;
-    use std::fs;
-    use std::process::Command;
-
-    let systemd_user_dir = home_dir().unwrap().join(".config/systemd/user");
-
-    // Ensure the directory exists
-    if !systemd_user_dir.exists() {
-        fs::create_dir_all(&systemd_user_dir).expect("Failed to create systemd user directory");
-    }
-
-    let service_file = systemd_user_dir.join("clipboard-manager.service");
-
-    let service_content = format!(
-        "[Unit]
-        Description=Clipboard Manager
-        After=network.target
-
-        [Service]
-        ExecStart={}
-        Restart=always
-        Environment=DISPLAY=:0
-
-        [Install]
-        WantedBy=default.target",
-        binary_path.display()
-    );
-
-    fs::write(&service_file, service_content).expect("Failed to write systemd service");
-
-    // Reload systemd daemon to recognize the new service
-    Command::new("systemctl")
-        .args(["--user", "daemon-reload"])
-        .output()
-        .expect("Failed to reload systemd daemon");
-
-    // Enable and start the service
-    Command::new("systemctl")
-        .args(["--user", "enable", "clipboard-manager"])
-        .output()
-        .expect("Failed to enable systemd service");
-
-    Command::new("systemctl")
-        .args(["--user", "start", "clipboard-manager"])
-        .output()
-        .expect("Failed to start clipboard-manager");
-}
-
-/// 📌 macOS: Create a `launchd` plist for auto-start
-#[cfg(target_os = "macos")]
-fn setup_autostart_macos(binary_path: &PathBuf) {
-    let plist_file = home_dir()
-        .unwrap()
-        .join("Library/LaunchAgents/com.clipboard.manager.plist");
-
-    let plist_content = format!(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>
-<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">
-<plist version=\"1.0\">
-    <dict>
-        <key>Label</key>
-        <string>com.clipboard.manager</string>
-        <key>ProgramArguments</key>
-        <array>
-            <string>{}</string>
-        </array>
-        <key>RunAtLoad</key>
-        <true/>
-        <key>KeepAlive</key>
-        <true/>
-    </dict>
-</plist>",
-        binary_path.display()
-    );
-
-    fs::write(&plist_file, plist_content).expect("Failed to write macOS launchd plist");
-
-    Command::new("launchctl")
-        .args(["load", plist_file.to_str().unwrap()])
-        .output()
-        .expect("Failed to load launchd plist");
-
-    Command::new("launchctl")
-        .args(["start", "com.clipboard.manager"])
-        .output()
-        .expect("Failed to start clipboard-manager");
-}
-
-/// 📌 Windows: Create a Task Scheduler entry
-#[cfg(target_os = "windows")]
-fn setup_autostart_windows(binary_path: &PathBuf) {
-    let task_name = "ClipboardManager";
-
-    Command::new("schtasks")
-        .args(&[
-            "/Create",
-            "/F",
-            "/SC",
-            "ONLOGON",
-            "/TN",
-            task_name,
-            "/TR",
-            binary_path.to_str().unwrap(),
-            "/RL",
-            "LOW",
-        ])
-        .output()
-        .expect("Failed to create Windows scheduled task");
 }
 
 /// 📌 Runs the clipboard monitoring (Replace with your actual logic)
